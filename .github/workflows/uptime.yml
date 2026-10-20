@@ -1,0 +1,62 @@
+# Bridge ID 44 S3 — from LICENSING tools/uptime-gha (ID 24 S5) + the office's own host. Activation = README.md here.
+# Goes to .github/workflows/uptime.yml in a SEPARATE PUBLIC repository (e.g. thearkanproject/nutritionhero-uptime) next
+# to check.sh. Public on purpose: Actions minutes are free and unlimited for public repositories, while a 5-minute
+# schedule in a private one needs ~8,600 minutes a month against the free plan's 2,000 — shared by EVERY private repo
+# of the account, so it would also stop the backup / mirror workflows. The repository holds no secret: the ntfy topic is
+# the repository secret NTFY_TOPIC (GitHub masks it in logs) and the targets are public URLs.
+name: uptime
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'     # best effort: GitHub may start a run a few minutes late
+    - cron: '0 7 1 * *'       # 1st of the month, 07:00 UTC (10:00 Athens): the restore-drill reminder
+  workflow_dispatch: {}
+
+permissions:
+  contents: write             # to commit state/ when it changes and the monthly keep-alive
+
+concurrency:
+  group: uptime
+  cancel-in-progress: false
+
+jobs:
+  check:
+    if: github.event.schedule != '0 7 1 * *'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check
+        env:
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+        # tr: core.autocrlf on the uploading PC can turn check.sh into CRLF, which bash on Linux cannot run
+        run: tr -d '\r' < check.sh > /tmp/check.sh && bash /tmp/check.sh https://sync.nutritionhero.gr/health https://enallaktiko.nutritionhero.gr/healthz https://app.nutritionhero.gr/healthz
+      - name: Save state (only when it changed)
+        run: |
+          git add state
+          if git diff --cached --quiet; then echo "state unchanged"; exit 0; fi
+          git -c user.name=uptime -c user.email=uptime@users.noreply.github.com commit -q -m "state $(date -u +%FT%TZ)"
+          git push -q
+
+  monthly:
+    if: github.event.schedule == '0 7 1 * *'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Restore-drill reminder
+        env:
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+        run: |
+          [ -z "$NTFY_TOPIC" ] && { echo "no topic"; exit 0; }
+          curl -sS -m 15 -o /dev/null -H 'Content-Type: application/json' \
+            --data-binary "{\"topic\":\"$NTFY_TOPIC\",\"title\":\"Nutrition Hero: μηνιαία άσκηση επαναφοράς\",\"message\":\"Ήρθε η ώρα για την άσκηση επαναφοράς της βάσης αδειών (docs/RESTORE-DRILL.md). Περίπου 10 λεπτά.\",\"priority\":3,\"tags\":[\"calendar\"]}" \
+            https://ntfy.sh/ && echo "reminder sent"
+      # GitHub disables schedules in a public repository after 60 days without activity; this monthly commit is the
+      # activity that keeps the 5-minute check alive.
+      - name: Keep-alive
+        run: |
+          date -u +%F > keepalive.txt
+          git add keepalive.txt
+          git -c user.name=uptime -c user.email=uptime@users.noreply.github.com commit -q -m "keep-alive $(date -u +%F)"
+          git push -q
